@@ -2,7 +2,23 @@
    IMG Pricing v4 — Utils (copied from v2, do NOT modify logic)
    ═══════════════════════════════════════════════════════ */
 
+import { normP } from "./norm";
+import {
+  findProductIdx, findPricesIdx,
+  findSupplierByIdOrName, findSupplierByName,
+  findCompSelf, findSkuByCode,
+} from "./indexes";
+
 export const VER = "4.0";
+
+/* ── Chiều cao bảng ──────────────────────────────────────────────
+   Trước đây mỗi trang đặt một con số phần trăm khác nhau (50vh…75vh),
+   nên màn hình càng cao càng thừa chỗ trống phía dưới.
+   Nay bảng tự kéo dài lấp hết phần còn lại của màn hình, có sàn tối thiểu
+   để trên máy màn hình thấp bảng không bị bẹp. */
+export const TBL_H = "max(320px, calc(100vh - 258px))";        // trang tiêu chuẩn
+export const TBL_H_TALL = "max(320px, calc(100vh - 208px))";   // trang ít phần đầu
+export const TBL_H_SHORT = "max(300px, calc(100vh - 320px))";  // trang nhiều phần đầu
 
 // ── Theme ──
 export const T = {
@@ -15,15 +31,15 @@ export const css = `@import url('https://fonts.googleapis.com/css2?family=JetBra
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Outfit',sans-serif;background:${T.bg};color:${T.tx}}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:${T.bd};border-radius:3px}
-input,select,textarea{font-family:'Outfit',sans-serif;background:${T.sa};color:${T.tx};border:1px solid ${T.bd};border-radius:6px;padding:7px 11px;font-size:13px;outline:none;transition:border .2s}
+input,select,textarea{font-family:'Outfit',sans-serif;background:${T.sa};color:${T.tx};border:1px solid ${T.bd};border-radius:6px;padding:7px 11px;font-size:15px;outline:none;transition:border .2s}
 input:focus,select:focus,textarea:focus{border-color:${T.p}}
-button{font-family:'Outfit',sans-serif;cursor:pointer;border:none;border-radius:6px;padding:7px 14px;font-size:12.5px;font-weight:500;transition:all .15s}
-table{width:100%;border-collapse:collapse;font-size:11.5px}
-th{background:${T.sa};color:${T.tm};font-weight:500;text-transform:uppercase;font-size:9.5px;letter-spacing:.4px;padding:7px 8px;text-align:left;position:sticky;top:0;z-index:2;border-bottom:1px solid ${T.bd}}
+button{font-family:'Outfit',sans-serif;cursor:pointer;border:none;border-radius:6px;padding:7px 14px;font-size:14px;font-weight:500;transition:all .15s}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:${T.sa};color:${T.tm};font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.4px;padding:7px 8px;text-align:left;position:sticky;top:0;z-index:2;border-bottom:1px solid ${T.bd}}
 td{padding:5px 8px;border-bottom:1px solid ${T.bd}}
 tr:hover td{background:rgba(59,130,246,.03)}
-.m{font-family:'JetBrains Mono',monospace;font-size:11px}
-.b{display:inline-block;padding:2px 6px;border-radius:9px;font-size:9.5px;font-weight:600}
+.m{font-family:'JetBrains Mono',monospace;font-size:13px}
+.b{display:inline-block;padding:2px 6px;border-radius:9px;font-size:11px;font-weight:600}
 .bok{background:rgba(16,185,129,.12);color:#34d399}
 .bw{background:rgba(245,158,11,.12);color:#fbbf24}
 .bdg{background:rgba(239,68,68,.12);color:#f87171}
@@ -37,13 +53,27 @@ tr:hover td{background:rgba(59,130,246,.03)}
 .toggle{position:relative;width:36px;height:20px;border-radius:10px;cursor:pointer;transition:background .2s}
 .toggle::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .2s}
 .toggle.on{background:${T.ac}}.toggle.on::after{transform:translateX(16px)}
-.toggle.off{background:${T.td}}`;
+.toggle.off{background:${T.td}}
+/* Dòng của bảng dùng CUỘN ẢO — bắt buộc mọi dòng cùng chiều cao, nếu không
+   thanh cuộn sẽ nhảy. Xem lib/useVirtualRows.js (ROW_H phải khớp 26px). */
+tr.vrow{height:30px}
+tr.vrow>td{padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+tr.vrow input[type=text],tr.vrow input:not([type]){height:24px;padding:1px 5px;font-size:12px}`;
 
 // ── Utilities ──
 export const fmt = (n, d = 2) => n == null ? "--" : "$" + Number(n).toFixed(d);
 export const pn = (v) => { if (v == null || v === "") return null; const n = parseFloat(String(v).replace(/[$,]/g, "")); return isNaN(n) ? null : n };
 export const SZ_ORD = { "2T": 1, "3T": 2, "4T": 3, "5T": 4, "6T": 5, "XS": 10, "S": 11, "M": 12, "L": 13, "XL": 14, "2XL": 15, "3XL": 16, "4XL": 17, "5XL": 18, "6XL": 19 };
-export const szOrd = (s) => { const v = SZ_ORD[s]; if (v) return v; const n = parseFloat(s); return isNaN(n) ? 50 : 30 + n };
+/* Thứ tự size để SẮP XẾP HIỂN THỊ (không dùng trong tính giá).
+   Dữ liệu thật có những giá trị như "S " (dư một dấu cách) hay "40 oz" / "40 OZ".
+   Bản cũ tra bảng theo đúng nguyên văn nên "S " không khớp "S", rơi xuống 50
+   và bị đẩy xuống CUỐI bảng — đúng hiện tượng thấy ở Router Preview.
+   Nay chuẩn hoá trước khi tra: bỏ khoảng trắng thừa và không phân biệt hoa-thường. */
+export const szOrd = (s) => {
+  const k = String(s ?? "").trim().toUpperCase();
+  const v = SZ_ORD[k]; if (v) return v;
+  const n = parseFloat(k); return isNaN(n) ? 50 : 30 + n;
+};
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 // ── Calculation Engines ──
@@ -66,36 +96,17 @@ export function calcLabel(oz, tiers, pm) {
 }
 
 // Normalize product name for matching: strip extra spaces, normalize dashes in parens
-const normP = s => (s || "").toLowerCase().trim().replace(/\s*-\s*/g, "-").replace(/\s+/g, " ");
+// (đã chuyển sang lib/norm.js — cùng công thức, thêm cache)
+export { normP };
 
+// Tra cứu qua "mục lục" thay vì quét cả mảng. Kết quả giữ nguyên như bản cũ;
+// bản cũ được lưu nguyên văn ở lib/legacy.js để đối chiếu.
 export function findProduct(P, p, s) {
-  const pl = normP(p), sl = s.toLowerCase().trim();
-  let w = P.find(x => x.product === p && x.size === s);
-  if (w) return w;
-  w = P.find(x => normP(x.product) === pl && x.size.toLowerCase().trim() === sl);
-  if (w) return w;
-  w = P.find(x => (normP(x.product).includes(pl) || pl.includes(normP(x.product))) && x.size.toLowerCase().trim() === sl);
-  if (w) return w;
-  if (p.includes("|")) {
-    const b = normP(p.split("|").slice(0, -1).join("|"));
-    w = P.find(x => normP(x.product) === b && x.size.toLowerCase().trim() === sl);
-  }
-  return w || null;
+  return findProductIdx(P, p, s);
 }
 
 export function findPrices(P, p, s) {
-  const pl = normP(p), sl = s.toLowerCase().trim();
-  let r = P.filter(x => x.product === p && x.size === s);
-  if (r.length) return r;
-  r = P.filter(x => normP(x.product) === pl && x.size.toLowerCase().trim() === sl);
-  if (r.length) return r;
-  r = P.filter(x => (normP(x.product).includes(pl) || pl.includes(normP(x.product))) && x.size.toLowerCase().trim() === sl);
-  if (r.length) return r;
-  if (p.includes("|")) {
-    const b = normP(p.split("|").slice(0, -1).join("|"));
-    r = P.filter(x => normP(x.product) === b && x.size.toLowerCase().trim() === sl);
-  }
-  return r || [];
+  return findPricesIdx(P, p, s);
 }
 
 export function getScenarios(prod, sz, side, products, suppliers, prices, params, labelTiers, compPrices, spInfo) {
@@ -109,7 +120,7 @@ export function getScenarios(prod, sz, side, products, suppliers, prices, params
   const bldL = lbl ? lbl.bld : cheapL;
   const sc = [];
   findPrices(prices, cprod, csz).forEach(pr => {
-    const sup = suppliers.find(s => s.id === pr.supplierId || s.name === pr.supplierId);
+    const sup = findSupplierByIdOrName(suppliers, pr.supplierId);
     if (!sup || !sup.active) return;
     const cpSX = pr.totalCost;
     let c2 = 0;
@@ -126,9 +137,7 @@ export function getScenarios(prod, sz, side, products, suppliers, prices, params
     }
     if (sup.selfShip) {
       // Use canonical name AND fuzzy match for comp_prices lookup
-      let cs = compPrices.find(c => c.comp === sup.name && c.product === cprod && c.size === csz);
-      if (!cs) cs = compPrices.find(c => c.comp === sup.name && c.product === prod && c.size === sz);
-      if (!cs) { const pl = cprod.toLowerCase().trim(), sl = csz.toLowerCase().trim(); cs = compPrices.find(c => c.comp === sup.name && c.size.toLowerCase().trim() === sl && (c.product.toLowerCase().trim() === pl || c.product.toLowerCase().trim().includes(pl) || pl.includes(c.product.toLowerCase().trim()))) }
+      const cs = findCompSelf(compPrices, sup.name, cprod, csz, prod, sz);
       const sl = cs?.shipFirst != null ? cs.shipFirst - (params.a2kDiscount || 0) : 0;
       sc.push({ sup: sup.name, sid: sup.id, lbl: "Self", cost: Math.round((cpSX + c2 + sl) * 100) / 100, pr });
     }
@@ -162,7 +171,7 @@ export const DEF_PARAMS = {
 
 // ── Router Engine ──
 export function routeOneSKU(skuCode, skuImg, products, suppliers, prices, params, labelTiers, compPrices, supStock, routeCfg, prodMap) {
-  const raw = skuImg.find(s => s.sku === skuCode);
+  const raw = findSkuByCode(skuImg, skuCode);
   if (!raw) return { sup: "UNKNOWN", lbl: "", cost: 0, err: "SKU not found", sk: null, sku: skuCode };
   const sk = { ...raw, product: raw.product || raw.p || "", size: raw.size || raw.z || "", color: raw.color || raw.c || "", printArea: raw.printArea || raw.a || "" };
   const prod = sk.product, sz = sk.size, side = sk.printArea || "One side";
@@ -171,7 +180,7 @@ export function routeOneSKU(skuCode, skuImg, products, suppliers, prices, params
   if (!sc.length) return { sup: "NO_STOCK", lbl: "", cost: 0, err: "No supplier has pricing", sk, sku: skuCode };
   const mode = routeCfg.labelMode || "BLENDED";
   const filtered = mode === "BLENDED" ? sc : mode === "EXP_ONLY" ? sc.filter(s => s.lbl === "Exp" || s.lbl === "Self" || s.lbl === "Bld") : sc.filter(s => s.lbl === "Cheap" || s.lbl === "Bld" || s.lbl === "Self");
-  const active = filtered.filter(s => { const sup = suppliers.find(x => x.name === s.sup); return sup && sup.active });
+  const active = filtered.filter(s => { const sup = findSupplierByName(suppliers, s.sup); return sup && sup.active });
   if (!active.length) return { sup: sc[0]?.sup || "UNKNOWN", lbl: sc[0]?.lbl || "", cost: sc[0]?.cost || 0, err: "No supplier in mode " + mode, sk, sku: skuCode };
   return { sup: active[0].sup, lbl: active[0].lbl, cost: active[0].cost, err: null, sk, sku: skuCode };
 }
@@ -212,7 +221,7 @@ export const SRC_OPTS = [
 
 // ── SKU Presets per supplier ──
 export const SKU_PRESETS = {
-  YolCol: { productCol: "Product ", sizeCol: null, colorCol: null, sideCol: "SKU", skuCol: "_SKU_CODE", upper: true, note: "Yoycol: Code|Side → SKU. Cột SKU = side type (Front/Back/Front&Back). Cần rename cột 8 thành _SKU_CODE trước khi import." },
+  YolCol: { productCol: "Product ", sizeCol: null, colorCol: null, sideCol: "SKU", skuCol: "_SKU_CODE", upper: true, note: "YolCol: mỗi sản phẩm có 3 dòng theo mặt in (Front / Back / Front&Back), mỗi dòng một mã riêng. Chọn Side Column = cột chứa Front/Back, SKU Output Column = cột chứa mã. Không tách theo size." },
   Zootop: { productCol: "BrandCode", sizeCol: "Size", colorCol: "Color", sideCol: null, skuCol: "SKU", upper: true, note: "ZooTop: BrandCode + Color + Size → SKU" },
   TeaPrint: { productCol: "Product", sizeCol: null, colorCol: "Color name", sideCol: null, skuCol: null, upper: true, note: "TeaPrint: Product + Color → stock verification (không có SKU output)" },
   PrintPoss: { productCol: "Product", sizeCol: null, colorCol: null, sideCol: null, skuCol: "SKU", variantCol: "Variant", upper: true, note: "PrintPoss: Variant → SKU (Phone case)" }

@@ -23,7 +23,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
               background: "#1a2235",
               border: "1px solid #1e2a3f",
               color: "#e2e8f0",
-              fontSize: 13,
+              fontSize: 15,
             },
           }}
         />

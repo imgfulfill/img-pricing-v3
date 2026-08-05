@@ -32,123 +32,203 @@ export function DataProvider({ children }) {
   const [routeCfg, setRouteCfg] = useState({ labelMode: "BLENDED", apiSups: [], tpls: {}, skuResolvers: {} });
   const [prodMap, setProdMap] = useState({});
   const [warehouseNotes, setWarehouseNotes] = useState([]);
-  const [dataLoading, setDataLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(true);       // chưa có dữ liệu nền → chặn khung giao diện
+  const [heavyLoading, setHeavyLoading] = useState(true);     // các bảng lớn còn đang tải
+  const [loadProgress, setLoadProgress] = useState({ done: 0, total: 12 });
 
-  // Helper: fetch all rows (Supabase default limit = 1000)
-  const fetchAll = async (table, orderCol) => {
-    const PAGE = 1000; let all = []; let from = 0;
-    while (true) {
-      let q = supabase.from(table).select("*").range(from, from + PAGE - 1);
-      if (orderCol) q = q.order(orderCol);
-      const { data, error } = await q;
-      if (error) { console.error("fetchAll " + table + ":", error); break; }
-      if (!data || data.length === 0) break;
-      all = all.concat(data);
-      if (data.length < PAGE) break;
+  // ═══════════════════════════════════════════════════════
+  // TẢI DỮ LIỆU
+  //
+  // QUAN TRỌNG: phải luôn có cột sắp xếp và cột cuối cùng phải là duy nhất (id).
+  // Phân trang bằng .range() mà không sắp xếp cố định thì PostgreSQL không đảm bảo
+  // thứ tự giữa các trang → có thể lấy trùng dòng hoặc bỏ sót dòng, và thứ tự mảng
+  // đổi sau mỗi lần sửa dữ liệu (khiến kết quả "khớp đầu tiên thắng" không ổn định).
+  // ═══════════════════════════════════════════════════════
+
+  const PAGE = 1000;
+  const MAX_SONG_SONG = 8;   // số yêu cầu chạy cùng lúc — vừa nhanh vừa nhẹ cho Supabase free
+
+  const fetchPage = async (table, orderCols, from) => {
+    let q = supabase.from(table).select("*").range(from, from + PAGE - 1);
+    for (const c of orderCols) q = q.order(c);
+    const { data, error } = await q;
+    if (error) throw new Error(table + ": " + error.message);
+    return data || [];
+  };
+
+  // Cách cũ: xin trang 1, chờ xong mới xin trang 2... 14.000 dòng = 15 lượt nối đuôi.
+  const fetchAllTuanTu = async (table, orderCols) => {
+    let all = [], from = 0;
+    for (;;) {
+      const d = await fetchPage(table, orderCols, from);
+      if (!d.length) break;
+      all = all.concat(d);
+      if (d.length < PAGE) break;
       from += PAGE;
     }
     return all;
   };
 
+  // Cách mới: hỏi tổng số dòng trước, rồi xin tất cả các trang CÙNG LÚC (tối đa 8 luồng).
+  const fetchAll = async (table, ...orderCols) => {
+    try {
+      const { count, error } = await supabase.from(table).select("*", { count: "exact", head: true });
+      if (error || count == null) return await fetchAllTuanTu(table, orderCols);   // không đếm được → quay về cách cũ
+      if (count === 0) return [];
+
+      const offsets = [];
+      for (let f = 0; f < count; f += PAGE) offsets.push(f);
+
+      const pages = new Array(offsets.length);
+      let next = 0;
+      const worker = async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= offsets.length) return;
+          pages[i] = await fetchPage(table, orderCols, offsets[i]);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(MAX_SONG_SONG, offsets.length) }, worker));
+
+      const all = pages.flat();
+
+      // Nếu có ai đó chèn thêm dòng trong lúc đang tải thì trang cuối sẽ đầy —
+      // khi đó lấy nốt phần dư. Bình thường trang cuối không đầy nên không tốn thêm lượt nào.
+      const last = pages[pages.length - 1] || [];
+      if (last.length === PAGE) {
+        let from = offsets.length * PAGE;
+        for (;;) {
+          const d = await fetchPage(table, orderCols, from);
+          if (!d.length) break;
+          all.push(...d);
+          if (d.length < PAGE) break;
+          from += PAGE;
+        }
+      }
+      return all;
+    } catch (e) {
+      console.error("fetchAll " + table + ":", e);
+      return await fetchAllTuanTu(table, orderCols);
+    }
+  };
+
+  // ── Áp dữ liệu thô vào state — tách riêng để tải lại TỪNG BẢNG cũng dùng được ──
+  const applyProducts = (rows) => setProducts((rows || []).map(productFromDb));
+  const applyPrices = (rows) => setPrices((rows || []).map(priceFromDb));
+  const applyCompPrices = (rows) => setCompPrices((rows || []).map(compPriceFromDb));
+  const applySkuImg = (rows) => setSkuImg((rows || []).map(skuImgFromDb));
+  const applySuppliers = (rows) => setSuppliers((rows || []).map(supplierFromDb));
+  const applyLabelTiers = (rows) => setLabelTiers((rows || []).map(labelTierFromDb));
+  const applyWhNotes = (rows) => setWarehouseNotes((rows || []).map(whNoteFromDb));
+
+  const applyParams = (rows) => {
+    if (!rows?.length) return;
+    const p = { ...DEF_PARAMS };
+    rows.forEach(r => {
+      if (r.key === "categoryShip") {
+        try { p.categoryShip = typeof r.value === "string" ? JSON.parse(r.value) : r.value } catch (e) { /* keep default */ }
+      } else if (r.key && r.value != null) {
+        p[r.key] = typeof r.value === "object" ? r.value : Number(r.value) || 0;
+      }
+    });
+    setParams(p);
+  };
+  const applyLocked = (rows) => {
+    const lk = {};
+    (rows || []).forEach(r => { const row = lockedPriceFromDb(r); lk[row.product + "|||" + row.size] = row.lockedValue });
+    setLockedPrices(lk);
+  };
+  const applySupStock = (rows) => {
+    const ss = {};
+    (rows || []).forEach(r => {
+      const row = supStockFromDb(r);
+      if (!ss[row.sku]) ss[row.sku] = {};
+      Object.assign(ss[row.sku], row.stock || {});
+    });
+    setSupStock(ss);
+  };
+  const applyProdMap = (rows) => {
+    const pm = {};
+    (rows || []).forEach(r => {
+      const row = prodMapFromDb(r);
+      pm[row.productImg] = { yoycol: row.yoycol, zootop: row.zootop, teaprint: row.teaprint, printposs: row.printposs };
+    });
+    setProdMap(pm);
+  };
+
+  // Bảng LỚN — phải phân trang. Bảng NHỎ — một lượt là xong.
+  const BANG_LON = {
+    products: () => fetchAll("products", "product", "id"),   // "product" giữ thứ tự hiển thị, "id" là chốt duy nhất
+    prices: () => fetchAll("prices", "id"),
+    comp_prices: () => fetchAll("comp_prices", "id"),
+    sku_img: () => fetchAll("sku_img", "id"),
+  };
+  const AP_DUNG = {
+    products: applyProducts, prices: applyPrices, comp_prices: applyCompPrices, sku_img: applySkuImg,
+  };
+
   // ── LOAD ALL DATA ──
   const loadAllData = useCallback(async () => {
-    setDataLoading(true);
-    try {
-      // Parallel fetch small tables
-      const [
-        { data: supData },
-        { data: paramData },
-        { data: ltData },
-        { data: lpData },
-        { data: ssData },
-        { data: rcData },
-        { data: pmData },
-        { data: wnData },
-      ] = await Promise.all([
-        supabase.from("suppliers").select("*"),
-        supabase.from("params").select("*"),
-        supabase.from("label_tiers").select("*").order("sort_order"),
-        supabase.from("locked_prices").select("*"),
-        supabase.from("sup_stock").select("*"),
-        supabase.from("route_cfg").select("*").limit(1),
-        supabase.from("prod_map").select("*"),
-        supabase.from("warehouse_notes").select("*"),
-      ]);
+    setDataLoading(true); setHeavyLoading(true);
+    let done = 0; const total = 12;
+    setLoadProgress({ done: 0, total });
+    const tick = () => setLoadProgress({ done: ++done, total });
 
-      // Fetch large tables with pagination
-      const [prodData, priceData, cpData, siData] = await Promise.all([
-        fetchAll("products", "product"),
-        fetchAll("prices"),
-        fetchAll("comp_prices"),
-        fetchAll("sku_img"),
+    // NHÓM NHỎ — đủ để dựng giao diện
+    const nhomNho = (async () => {
+      const [sup, prm, lt, lp, ss, rc, pm, wn] = await Promise.all([
+        supabase.from("suppliers").select("*").then(r => (tick(), r)),
+        supabase.from("params").select("*").then(r => (tick(), r)),
+        supabase.from("label_tiers").select("*").order("sort_order").then(r => (tick(), r)),
+        supabase.from("locked_prices").select("*").then(r => (tick(), r)),
+        supabase.from("sup_stock").select("*").then(r => (tick(), r)),
+        supabase.from("route_cfg").select("*").limit(1).then(r => (tick(), r)),
+        supabase.from("prod_map").select("*").then(r => (tick(), r)),
+        supabase.from("warehouse_notes").select("*").then(r => (tick(), r)),
       ]);
+      applySuppliers(sup.data); applyParams(prm.data); applyLabelTiers(lt.data);
+      applyLocked(lp.data); applySupStock(ss.data);
+      if (rc.data?.length) setRouteCfg(routeCfgFromDb(rc.data[0]));
+      applyProdMap(pm.data); applyWhNotes(wn.data);
+    })();
 
-      if (prodData) setProducts(prodData.map(productFromDb));
-      if (supData) setSuppliers(supData.map(supplierFromDb));
-      if (priceData) setPrices(priceData.map(priceFromDb));
-      
-      // Params: merge from DB rows into single object
-      if (paramData?.length) {
-        const p = { ...DEF_PARAMS };
-        paramData.forEach(r => {
-          if (r.key === "categoryShip") {
-            try { p.categoryShip = typeof r.value === "string" ? JSON.parse(r.value) : r.value } catch (e) { /* keep default */ }
-          } else if (r.key && r.value != null) {
-            p[r.key] = typeof r.value === "object" ? r.value : Number(r.value) || 0;
-          }
-        });
-        setParams(p);
-      }
-      
-      if (ltData) setLabelTiers(ltData.map(labelTierFromDb));
-      if (cpData) setCompPrices(cpData.map(compPriceFromDb));
-      
-      // Locked prices: build { "product|||size": { v, w, x, sf } } map
-      if (lpData) {
-        const lk = {};
-        lpData.forEach(r => {
-          const row = lockedPriceFromDb(r);
-          lk[row.product + "|||" + row.size] = row.lockedValue;
-        });
-        setLockedPrices(lk);
-      }
-      
-      if (siData) setSkuImg(siData.map(skuImgFromDb));
-      
-      // Sup stock: build { supplierName: { stock, hdr, rows, skuMap } }
-      if (ssData) {
-        const ss = {};
-        ssData.forEach(r => {
-          const row = supStockFromDb(r);
-          if (!ss[row.sku]) ss[row.sku] = {};
-          Object.assign(ss[row.sku], row.stock || {});
-        });
-        setSupStock(ss);
-      }
-      
-      if (rcData?.length) setRouteCfg(routeCfgFromDb(rcData[0]));
-      
-      // Prod map: build { productImg: { yoycol, zootop, ... } }
-      if (pmData) {
-        const pm = {};
-        pmData.forEach(r => {
-          const row = prodMapFromDb(r);
-          pm[row.productImg] = { yoycol: row.yoycol, zootop: row.zootop, teaprint: row.teaprint, printposs: row.printposs };
-        });
-        setProdMap(pm);
-      }
-      
-      if (wnData) setWarehouseNotes(wnData.map(whNoteFromDb));
-    } catch (err) {
-      console.error("loadAllData:", err);
-      toast.error("Lỗi tải dữ liệu: " + err.message);
-    }
-    setDataLoading(false);
+    // NHÓM LỚN — trước đây phải CHỜ nhóm nhỏ xong mới được bắt đầu. Nay chạy song song.
+    const nhomLon = (async () => {
+      const [prod, price, cp, si] = await Promise.all([
+        BANG_LON.products().then(r => (tick(), r)),
+        BANG_LON.prices().then(r => (tick(), r)),
+        BANG_LON.comp_prices().then(r => (tick(), r)),
+        BANG_LON.sku_img().then(r => (tick(), r)),
+      ]);
+      applyProducts(prod); applyPrices(price); applyCompPrices(cp); applySkuImg(si);
+    })();
+
+    const bao = (err) => { console.error("loadAllData:", err); toast.error("Lỗi tải dữ liệu: " + (err?.message || err)) };
+    const pNho = nhomNho.catch(bao);
+    const pLon = nhomLon.catch(bao);
+
+    await pNho;
+    setDataLoading(false);     // mở khoá khung giao diện ngay khi có dữ liệu nền
+    await pLon;
+    setHeavyLoading(false);
   }, []);
 
   useEffect(() => { loadAllData(); }, [loadAllData]);
 
-  // ── HELPER: refresh after bulk import ──
+  // ── Tải lại ĐÚNG bảng vừa thay đổi, thay vì tải lại toàn bộ 12 bảng ──
+  const reloadTables = useCallback(async (...names) => {
+    try {
+      await Promise.all(names.map(async (n) => {
+        const rows = await BANG_LON[n]();
+        AP_DUNG[n](rows);
+      }));
+    } catch (err) {
+      console.error("reloadTables:", err);
+      toast.error("Lỗi tải lại dữ liệu: " + (err?.message || err));
+    }
+  }, []);
+
+  // Giữ tên cũ cho tương thích: tải lại toàn bộ
   const refreshAfterImport = loadAllData;
 
   // ═══════════════════════════════════════════════════════
@@ -175,6 +255,33 @@ export function DataProvider({ children }) {
     if (error) { toast.error("Lỗi xóa SP: " + error.message); return false; }
     setProducts(prev => prev.filter(x => x.id !== id));
     toast.success("Đã xóa");
+    return true;
+  };
+
+  // Sửa hàng loạt: gộp thành MỘT lệnh ghi thay vì gọi máy chủ từng dòng.
+  // rows = danh sách sản phẩm ĐẦY ĐỦ (đã sửa sẵn trường cần đổi), bắt buộc có id.
+  const bulkUpdateProducts = async (rows) => {
+    const dbRows = rows.filter(r => r?.id).map(r => ({ id: r.id, ...productToDb(r) }));
+    if (!dbRows.length) return false;
+    const CH = 500;
+    for (let i = 0; i < dbRows.length; i += CH) {
+      const { error } = await supabase.from("products").upsert(dbRows.slice(i, i + CH));
+      if (error) { toast.error("Lỗi sửa hàng loạt SP: " + error.message); return false; }
+    }
+    await reloadTables("products");
+    toast.success("Đã sửa " + dbRows.length + " sản phẩm");
+    return true;
+  };
+  const bulkDeleteProducts = async (ids) => {
+    if (!ids?.length) return false;
+    const CH = 200;
+    for (let i = 0; i < ids.length; i += CH) {
+      const { error } = await supabase.from("products").delete().in("id", ids.slice(i, i + CH));
+      if (error) { toast.error("Lỗi xóa SP: " + error.message); return false; }
+    }
+    const idSet = new Set(ids);
+    setProducts(prev => prev.filter(x => !idSet.has(x.id)));
+    toast.success("Đã xóa " + ids.length + " sản phẩm");
     return true;
   };
 
@@ -243,7 +350,7 @@ export function DataProvider({ children }) {
     const dbRows = rows.map(r => priceToDb(r));
     const { error } = await supabase.from("prices").upsert(dbRows);
     if (error) { toast.error("Lỗi bulk upsert giá: " + error.message); return false; }
-    await refreshAfterImport();
+    await reloadTables("prices");
     toast.success("Cập nhật " + rows.length + " giá");
     return true;
   };
@@ -258,7 +365,7 @@ export function DataProvider({ children }) {
       const { error } = await supabase.from("comp_prices").insert(dbRows);
       if (error) { toast.error("Lỗi import ĐT: " + error.message); return false; }
     }
-    await refreshAfterImport();
+    await reloadTables("comp_prices");
     toast.success("Đã cập nhật " + newList.length + " giá đối thủ");
     return true;
   };
@@ -395,6 +502,19 @@ export function DataProvider({ children }) {
     toast.success("Đã xóa toàn bộ SKU IMG");
     return true;
   };
+  // Sửa hàng loạt SKU IMG — gộp một lệnh, KHÔNG tải lại toàn bộ bảng.
+  const bulkUpdateSkuImg = async (rows) => {
+    const dbRows = rows.filter(r => r?.id).map(r => ({ id: r.id, ...skuImgToDb(r) }));
+    if (!dbRows.length) return false;
+    const CH = 500;
+    for (let i = 0; i < dbRows.length; i += CH) {
+      const { error } = await supabase.from("sku_img").upsert(dbRows.slice(i, i + CH));
+      if (error) { toast.error("Lỗi sửa hàng loạt SKU: " + error.message); return false; }
+    }
+    await reloadTables("sku_img");
+    toast.success("Đã sửa " + dbRows.length + " SKU");
+    return true;
+  };
   const bulkUpsertSkuImg = async (rows) => {
     // Deduplicate by SKU — keep last occurrence
     const byKey = {};
@@ -410,7 +530,7 @@ export function DataProvider({ children }) {
       if (error) { toast.error("Lỗi batch " + (Math.floor(i / BATCH) + 1) + ": " + error.message); return false; }
       ok += chunk.length;
     }
-    await refreshAfterImport();
+    await reloadTables("sku_img");
     toast.success("Import " + ok + " SKU" + (dupCount > 0 ? " (bỏ " + dupCount + " trùng)" : ""));
     return true;
   };
@@ -484,18 +604,18 @@ export function DataProvider({ children }) {
       // STATE — read only
       products, suppliers, prices, params, labelTiers, compPrices,
       lockedPrices, skuImg, supStock, routeCfg, prodMap, warehouseNotes,
-      dataLoading,
+      dataLoading, heavyLoading, loadProgress,
 
       // ACTIONS — every mutation saves DB first
-      loadAllData, refreshAfterImport,
+      loadAllData, refreshAfterImport, reloadTables,
 
-      addProduct, updateProduct, deleteProduct,
+      addProduct, updateProduct, deleteProduct, bulkUpdateProducts, bulkDeleteProducts,
       addSupplier, updateSupplier, deleteSupplier, toggleSupplierActive,
       addPrice, updatePrice, deletePrice, bulkDeletePrices, bulkUpsertPrices,
       setCompPrices: setCompPricesAction, addCompPrice, updateCompPrice, deleteCompPrice,
       updateParams, updateLabelTiers,
       addLockedPrice, removeLockedPrice, updateLockedPrice, bulkSetLockedPrices, clearLockedPrices,
-      addSkuImg, updateSkuImg, deleteSkuImg, bulkDeleteSkuImg, clearAllSkuImg, bulkUpsertSkuImg,
+      addSkuImg, updateSkuImg, deleteSkuImg, bulkDeleteSkuImg, clearAllSkuImg, bulkUpsertSkuImg, bulkUpdateSkuImg,
       updateSupStock, updateRouteCfg, updateProdMap,
       addWhNote, updateWhNote, deleteWhNote,
     }}>

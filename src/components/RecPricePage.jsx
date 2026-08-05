@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { useData } from "../context/DataContext";
-import { T, pn, szOrd, fmt, calcLabel, getScenarios, ltColor } from "../lib/utils";
+import { T, pn, szOrd, fmt, calcLabel, getScenarios, ltColor, TBL_H_SHORT } from "../lib/utils";
+import { productsRawExact, pricesRawExact, compRawExact, compByProdSize } from "../lib/indexes";
 
 export default function RecPricePage() {
   const { products, suppliers, prices, params, labelTiers, compPrices, lockedPrices, addLockedPrice, removeLockedPrice, bulkSetLockedPrices } = useData();
@@ -15,30 +16,37 @@ export default function RecPricePage() {
   }).filter(s => s.cols.length > 0), [suppliers]);
   const lnColor = v => v == null ? T.td : v >= params.minProfit ? T.ac : v > 0 ? T.w : T.dg;
 
-  const data = useMemo(() => {
+  /* ── TẦNG 1 — phần tính NẶNG ───────────────────────────────────────────
+     Trước đây tầng này nằm chung một useMemo với ô tìm kiếm (q/fCat/fType),
+     nên gõ MỖI KÝ TỰ là tính lại toàn bộ bảng. Nay bộ lọc đã tách xuống tầng 3,
+     tầng này chỉ chạy lại khi dữ liệu gốc thật sự thay đổi. */
+  const vMap = useMemo(() => {
     const pKeys = [...new Set(prices.map(p => p.product + "|||" + p.size))]; const vMap = {};
     pKeys.forEach(k => {
-      const [prod, sz] = k.split("|||"); const w = products.find(p => p.product === prod && p.size === sz); if (!w) return;
+      const [prod, sz] = k.split("|||"); const w = productsRawExact(products, prod, sz); if (!w) return;
       const cat = w.category || "T-shirt all";
       const sc1All = getScenarios(prod, sz, "1S", products, suppliers, prices, params, labelTiers, compPrices);
       const sc2All = getScenarios(prod, sz, "2S", products, suppliers, prices, params, labelTiers, compPrices);
       const sc1 = sc1All.map(s => s.cost); const sc2 = sc2All.map(s => s.cost);
       const lbl = calcLabel(w.weightOz, labelTiers, params); const cheapL = params.cheapPrice, expL = lbl ? lbl.expE : params.expSmallest, bldL = lbl ? lbl.bld : cheapL;
+      // Tra bảng giá của cặp (SP, size) một lần rồi dùng lại 4 lần bên dưới —
+      // trước đây mỗi lần dùng là một lượt quét lại toàn bộ bảng giá.
+      const prsExact = pricesRawExact(prices, prod, sz);
       const reps = [];
-      prices.filter(p => p.product === prod && p.size === sz).forEach(pr => {
+      prsExact.forEach(pr => {
         const sup = supCols.find(s => s.name === pr.supplierId || s.id === pr.supplierId); if (!sup) return;
         let repLc = sup.selfShip ? 0 : (sup.useCheap && sup.useExp) ? bldL : sup.useExp ? expL : cheapL;
-        if (sup.selfShip) { const cs = compPrices.find(c => c.comp === sup.name && c.product === prod && c.size === sz); repLc = cs?.shipFirst != null ? cs.shipFirst - (params.a2kDiscount || 0) : 0 }
+        if (sup.selfShip) { const cs = compRawExact(compPrices, sup.name, prod, sz); repLc = cs?.shipFirst != null ? cs.shipFirst - (params.a2kDiscount || 0) : 0 }
         reps.push(Math.round((pr.totalCost + repLc) * 100) / 100);
       });
       const cpAvg = reps.length ? Math.round(reps.reduce((a, b) => a + b, 0) / reps.length * 100) / 100 : null;
       const cpMin = sc1[0] || null, cpMax = sc1.length ? sc1[sc1.length - 1] : null;
-      const numX = supCols.filter(s => prices.some(p => p.product === prod && p.size === sz && (p.supplierId === s.name || p.supplierId === s.id))).length;
-      const cps = compPrices.filter(c => c.product === prod && c.size === sz && c.total != null);
+      const numX = supCols.filter(s => prsExact.some(p => p.supplierId === s.name || p.supplierId === s.id)).length;
+      const cps = compByProdSize(compPrices, prod, sz).filter(c => c.total != null);
       let dtMin = null, dtMinName = "", dtMinPI = null, dtMin2nd = null, dtMinSF = null, dtMinSA = null;
       cps.forEach(c => { if (dtMin == null || c.total < dtMin) { dtMin = c.total; dtMinName = c.comp; dtMinPI = c.priceItem; dtMin2nd = c.price2nd; dtMinSF = c.shipFirst; dtMinSA = c.shipAdd } });
       const minDtPI = cps.length ? Math.min(...cps.map(c => c.priceItem).filter(x => x != null)) : null;
-      const all2nd = prices.filter(p => p.product === prod && p.size === sz).map(p => p.cost2nd).filter(x => x != null);
+      const all2nd = prsExact.map(p => p.cost2nd).filter(x => x != null);
       const max2nd = all2nd.length ? Math.max(...all2nd) : 0;
       const dt2nds = cps.map(c => c.price2nd).filter(x => x != null).sort((a, b) => a - b);
       const med2nd = dt2nds.length ? dt2nds[Math.floor(dt2nds.length / 2)] : 0;
@@ -52,11 +60,17 @@ export default function RecPricePage() {
       const vDTF = cands.length ? Math.round(Math.max(...cands) * 100) / 100 : null;
       const target = dtMin != null ? Math.round((dtMin - params.priceGap) * 100) / 100 : null;
       const floor = cpAvg != null ? Math.round((cpAvg + params.minProfit) * 100) / 100 : null;
-      const minBase = prices.filter(p => p.product === prod && p.size === sz).map(p => p.baseCost).filter(x => x != null);
+      const minBase = prsExact.map(p => p.baseCost).filter(x => x != null);
       const minBaseV = minBase.length ? Math.min(...minBase) : null;
       const best1 = sc1All[0] || null; const worst1 = sc1All.length ? sc1All[sc1All.length - 1] : null;
       vMap[k] = { prod, sz, k, cat, cpMin, cpAvg, cpMax, numX, dtMin, dtMinName, dtMinPI, dtMin2nd, dtMinSF, dtMinSA, dtCount: cps.length, minDtPI, rec2nd, shipF, shipA, vDTF, target, floor, minBaseV, isDTG: prod.endsWith("DTG"), best1, worst1, sc1, sc2 };
     });
+    return vMap;
+  }, [prices, products, supCols, suppliers, params, labelTiers, compPrices, N]);
+
+  /* ── TẦNG 2 — phần tính RẺ.
+     Chốt một giá hoặc đổi delta chỉ chạy lại tầng này, không đụng tầng 1. */
+  const computed = useMemo(() => {
     return Object.values(vMap).map(r => {
       let V = r.vDTF;
       if (r.isDTG) { const dtfK = r.prod.replace(/DTG$/, "DTF") + "|||" + r.sz; if (vMap[dtfK]?.vDTF != null) V = Math.round((vMap[dtfK].vDTF + delta) * 100) / 100 }
@@ -74,7 +88,7 @@ export default function RecPricePage() {
       const chPI = r.dtMinPI != null && W != null ? Math.round((r.dtMinPI - W) * 100) / 100 : null;
       const chSh = r.dtMinSF != null && r.shipF != null ? Math.round((r.dtMinSF - r.shipF) * 100) / 100 : null;
       const chTot = r.dtMin != null && V != null ? Math.round((r.dtMin - V) * 100) / 100 : null;
-      const rank = r.dtMin != null && V != null ? (compPrices.filter(c => c.product === r.prod && c.size === r.sz && c.total != null && c.total < V).length + 1) : null;
+      const rank = r.dtMin != null && V != null ? (compByProdSize(compPrices, r.prod, r.sz).filter(c => c.total != null && c.total < V).length + 1) : null;
       let verdict = "", verdictColor = T.tm;
       if (lnAvg == null) { verdict = "Thiếu data" }
       else if (lnAvg < 0) { verdict = "\u26A0 L\u1ed6 - LN Avg $" + lnAvg.toFixed(2) + "/\u0111\u01A1n"; verdictColor = T.dg }
@@ -95,11 +109,17 @@ export default function RecPricePage() {
       const scOk = s1Min >= scTarget && (r.sc2.length === 0 || s2Min >= scTarget);
       const scMsg = r.sc1.length === 0 ? "--" : ((scOk ? "\u2713 " : "\u26A0 ") + "1m: c\u00F3 l\u00E3i " + s1Prof + "/" + r.sc1.length + " \u2192 \u2265$" + params.minProfit.toFixed(2) + ": " + s1Min + "/" + s1Prof + (r.sc2.length > 0 ? " | 2m: c\u00F3 l\u00E3i " + s2Prof + "/" + r.sc2.length + " \u2192 \u2265$" + params.minProfit.toFixed(2) + ": " + s2Min + "/" + s2Prof : "") + " | Target: \u2265" + scTarget + " KB \u2265$" + params.minProfit.toFixed(2));
       return { ...r, V, W, lnMin, lnAvg, lnMax, chPI, chSh, chTot, rank, verdict, verdictColor, lockedV, actual, stressMsg, stressOk, scMsg, scOk, lkKey };
-    }).filter(r => {
-      if (q && !(r.prod + " " + r.sz).toLowerCase().includes(q.toLowerCase())) return false;
-      if (fCat && r.cat !== fCat) return false; if (fType && !r.prod.includes(fType)) return false; return true;
     }).sort((a, b) => a.prod.localeCompare(b.prod) || (szOrd(a.sz) - szOrd(b.sz)));
-  }, [prices, products, supCols, suppliers, params, labelTiers, compPrices, q, fCat, fType, N, delta, lockedPrices]);
+  }, [vMap, params, compPrices, N, delta, lockedPrices]);
+
+  /* ── TẦNG 3 — chỉ LỌC. Gõ vào ô tìm kiếm chỉ chạy tới đây.
+     Sắp xếp đã làm ở tầng 2; lọc sau khi sắp xếp cho ra đúng thứ tự như
+     lọc trước rồi sắp xếp, vì phép sắp xếp giữ nguyên thứ tự các phần bằng nhau.
+     .filter() luôn trả mảng MỚI nên không làm hỏng kết quả đã nhớ ở tầng 2. */
+  const data = useMemo(() => computed.filter(r => {
+    if (q && !(r.prod + " " + r.sz).toLowerCase().includes(q.toLowerCase())) return false;
+    if (fCat && r.cat !== fCat) return false; if (fType && !r.prod.includes(fType)) return false; return true;
+  }), [computed, q, fCat, fType]);
 
   const doCopy = async () => {
     const nw = { ...lockedPrices }; let n = 0;
@@ -113,16 +133,16 @@ export default function RecPricePage() {
     setEditLk(null);
   };
 
-  const HS = { fontSize: 7, position: "sticky", top: 28, zIndex: 3, background: T.sa, textAlign: "center", padding: "4px 3px", lineHeight: 1.3, cursor: "help" };
-  const GH = { position: "sticky", top: 0, zIndex: 3, textAlign: "center", fontSize: 10, fontWeight: 600, padding: "6px 4px" };
+  const HS = { fontSize: 8, position: "sticky", top: 31, zIndex: 3, background: T.sa, textAlign: "center", padding: "4px 3px", lineHeight: 1.3, cursor: "help" };
+  const GH = { position: "sticky", top: 0, zIndex: 3, textAlign: "center", fontSize: 12, fontWeight: 600, padding: "6px 4px" };
 
   return (
     <div className="fade">
       <h2 style={{ fontSize: 22, fontWeight: 700, fontStyle: "italic", marginBottom: 4 }}>{"Đề xuất giá bán"}</h2>
-      <div style={{ fontSize: 12, color: T.tm, marginBottom: 10 }}>{data.length} {"sản phẩm · Giá đề xuất dựa trên chi phí sản xuất IMG + giá đối thủ"}</div>
-      <button className="bg2" onClick={() => setShowInfo(!showInfo)} style={{ fontSize: 12, marginBottom: 12 }}>{showInfo ? "Ẩn giải thích công thức" : "Xem giải thích công thức"}</button>
-      {showInfo && <div style={{ background: T.sf, border: "1px solid " + T.bd, borderRadius: 10, padding: 16, marginBottom: 14, fontSize: 12, lineHeight: 1.8 }}>
-        <div style={{ color: T.ac, fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{"Cách tính giá đề xuất IMG"}</div>
+      <div style={{ fontSize: 14, color: T.tm, marginBottom: 10 }}>{data.length} {"sản phẩm · Giá đề xuất dựa trên chi phí sản xuất IMG + giá đối thủ"}</div>
+      <button className="bg2" onClick={() => setShowInfo(!showInfo)} style={{ fontSize: 14, marginBottom: 12 }}>{showInfo ? "Ẩn giải thích công thức" : "Xem giải thích công thức"}</button>
+      {showInfo && <div style={{ background: T.sf, border: "1px solid " + T.bd, borderRadius: 10, padding: 16, marginBottom: 14, fontSize: 14, lineHeight: 1.8 }}>
+        <div style={{ color: T.ac, fontWeight: 600, fontSize: 16, marginBottom: 8 }}>{"Cách tính giá đề xuất IMG"}</div>
         <div><b>{"Ship đơn đầu (Ship First):"}</b>{" Giá ship cho sản phẩm đầu tiên của order. Lấy Median giá ship của tất cả đối thủ, theo từng loại sản phẩm."}</div>
         <div style={{ marginTop: 6 }}><b>{"Ship đơn sau (Ship Additional):"}</b>{" Giá ship áp cho sản phẩm thứ 2 trở lên nếu trong cùng 1 order. Lấy Median giá ship đơn sau của đối thủ theo loại sản phẩm."}</div>
         <div style={{ marginTop: 6 }}><b>{"Giá mặt sau (2nd Side):"}</b>{" Giá in từ mặt thứ 2 trở lên. Lấy giá CAO NHẤT giữa (1) Median giá 2nd-side đối thủ và (2) chi phí 2nd-side đắt nhất trong " + supCols.length + " xưởng."}</div>
@@ -135,26 +155,26 @@ export default function RecPricePage() {
       </div>}
       <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Tìm..." style={{ width: 180 }} />
-        <select value={fType} onChange={e => setFType(e.target.value)} style={{ width: 80, fontSize: 11 }}><option value="">All</option><option>DTF</option><option>DTG</option></select>
-        <select value={fCat} onChange={e => setFCat(e.target.value)} style={{ width: 120, fontSize: 11 }}><option value="">All Cat</option>{cats.map(c => <option key={c}>{c}</option>)}</select>
+        <select value={fType} onChange={e => setFType(e.target.value)} style={{ width: 80, fontSize: 13 }}><option value="">All</option><option>DTF</option><option>DTG</option></select>
+        <select value={fCat} onChange={e => setFCat(e.target.value)} style={{ width: 120, fontSize: 13 }}><option value="">All Cat</option>{cats.map(c => <option key={c}>{c}</option>)}</select>
         <div style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: "auto", background: T.sf, border: "1px solid " + T.bd, borderRadius: 8, padding: "2px 8px" }}>
-          <span style={{ fontSize: 10, color: T.tm }}>Copy cột</span>
-          <select value={copyCol} onChange={e => setCopyCol(e.target.value)} style={{ width: 140, fontSize: 11, padding: 3 }}>
+          <span style={{ fontSize: 12, color: T.tm }}>Copy cột</span>
+          <select value={copyCol} onChange={e => setCopyCol(e.target.value)} style={{ width: 140, fontSize: 13, padding: 3 }}>
             <option value="V">{"Tổng giá đề xuất"}</option><option value="W">Price Item</option><option value="cpMin">CP Min</option><option value="cpAvg">CP Avg</option><option value="cpMax">CP Max</option><option value="floor">{"Sàn lợi nhuận"}</option><option value="target">{"Mục tiêu cạnh tranh"}</option><option value="dtMin">{"Tổng ĐT rẻ nhất"}</option>
-          </select><span style={{ fontSize: 10, color: T.tm }}>{"\u2192"}</span>
-          <button className="bp2" onClick={doCopy} style={{ fontSize: 10, padding: "4px 10px" }}>{"Paste → Giá chốt"}</button>
+          </select><span style={{ fontSize: 12, color: T.tm }}>{"\u2192"}</span>
+          <button className="bp2" onClick={doCopy} style={{ fontSize: 12, padding: "4px 10px" }}>{"Paste → Giá chốt"}</button>
         </div>
       </div>
-      {editLk && <div style={{ background: T.sf, border: "1px solid " + T.p, borderRadius: 8, padding: 10, marginBottom: 10, display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+      {editLk && <div style={{ background: T.sf, border: "1px solid " + T.p, borderRadius: 8, padding: 10, marginBottom: 10, display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
         <span style={{ color: T.tm }}>{"Giá chốt: "}<b style={{ color: T.tx }}>{editLk.replace("|||", " | ")}</b></span>
         <input type="number" step=".01" value={editLkVal} onChange={e => setEditLkVal(e.target.value)} style={{ width: 100, padding: 4 }} autoFocus />
-        <button className="bp2" onClick={saveLk} style={{ fontSize: 11 }}>{"Lưu"}</button>
-        <button className="bdel" onClick={async () => { const [p, s] = editLk.split("|||"); await removeLockedPrice(p, s); setEditLk(null) }} style={{ fontSize: 11 }}>{"Xóa"}</button>
-        <button className="bg2" onClick={() => setEditLk(null)} style={{ fontSize: 11 }}>{"Hủy"}</button>
+        <button className="bp2" onClick={saveLk} style={{ fontSize: 13 }}>{"Lưu"}</button>
+        <button className="bdel" onClick={async () => { const [p, s] = editLk.split("|||"); await removeLockedPrice(p, s); setEditLk(null) }} style={{ fontSize: 13 }}>{"Xóa"}</button>
+        <button className="bg2" onClick={() => setEditLk(null)} style={{ fontSize: 13 }}>{"Hủy"}</button>
       </div>}
       <div style={{ background: T.sf, border: "1px solid " + T.bd, borderRadius: 10, overflow: "hidden" }}>
-        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "62vh" }}>
-          <table style={{ minWidth: 2800, fontSize: 10 }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: TBL_H_SHORT }}>
+          <table style={{ minWidth: 2800, fontSize: 12 }}>
             <thead>
               <tr>
                 <th colSpan={4} style={{ ...GH, background: T.sa, position: "sticky", left: 0, zIndex: 5 }} />
@@ -187,7 +207,7 @@ export default function RecPricePage() {
                 {/* G4: ★ GIÁ ĐỀ XUẤT (7) */}
                 <th style={{ ...HS, borderLeft: "2px solid " + T.ac }} title={"Mục tiêu cạnh tranh = Tổng ĐT rẻ nhất − $" + params.priceGap + ". · IMG đặt giá thấp hơn đối thủ để có lợi thế cạnh tranh."}>TARGET</th>
                 <th style={{ ...HS }} title={"Sàn lợi nhuận = CP Avg + $" + params.minProfit + ". · Mức giá tối thiểu để đảm bảo lãi ít nhất $" + params.minProfit + "/đơn."}>FLOOR</th>
-                <th style={{ ...HS, fontSize: 9 }} title={"Tổng giá bán đề xuất = MAX(4 ràng buộc): · ① Cạnh tranh (rẻ hơn ĐT $" + params.priceGap + ") · ② Sàn LN (CP Avg + $" + params.minProfit + ") · ③ Chống lỗ (≥" + N + " KB không lỗ) · ④ DTG pin (DTF + $" + delta + ")"}>{"Tổng ĐX"}</th>
+                <th style={{ ...HS, fontSize: 10 }} title={"Tổng giá bán đề xuất = MAX(4 ràng buộc): · ① Cạnh tranh (rẻ hơn ĐT $" + params.priceGap + ") · ② Sàn LN (CP Avg + $" + params.minProfit + ") · ③ Chống lỗ (≥" + N + " KB không lỗ) · ④ DTG pin (DTF + $" + delta + ")"}>{"Tổng ĐX"}</th>
                 <th style={{ ...HS }} title={"Price Item đề xuất. · DTF: MAX(Base rẻ nhất, MIN(Tổng−Ship, PI rẻ nhất ĐT)). · DTG: PI DTF + $" + delta}>PI</th>
                 <th style={{ ...HS }} title="Giá in mặt sau = MAX(Median 2nd ĐT, Cost 2nd đắt nhất xưởng).">2nd</th>
                 <th style={{ ...HS }} title="Ship đơn đầu = Median Ship First của đối thủ, theo loại SP.">SF</th>
@@ -217,14 +237,14 @@ export default function RecPricePage() {
             <tbody>
               {data.map(r => (
                 <tr key={r.k}>
-                  <td style={{ position: "sticky", left: 0, background: T.sf, zIndex: 1, fontWeight: 500, fontSize: 10, whiteSpace: "nowrap" }}>{r.prod}</td>
+                  <td style={{ position: "sticky", left: 0, background: T.sf, zIndex: 1, fontWeight: 500, fontSize: 12, whiteSpace: "nowrap" }}>{r.prod}</td>
                   <td style={{ textAlign: "center" }}><span className={"b " + (r.isDTG ? "bp" : "bi")}>{r.sz}</span></td>
-                  <td style={{ fontSize: 9, color: T.tm }}>{r.cat}</td>
+                  <td style={{ fontSize: 10, color: T.tm }}>{r.cat}</td>
                   <td className="m" style={{ textAlign: "center" }}>{r.numX}</td>
                   <td className="m" style={{ textAlign: "right", borderLeft: "2px solid " + T.bh, color: T.ac }}>{fmt(r.cpMin)}</td>
                   <td className="m" style={{ textAlign: "right" }}>{fmt(r.cpAvg)}</td>
                   <td className="m" style={{ textAlign: "right", color: T.tm }}>{fmt(r.cpMax)}</td>
-                  <td style={{ borderLeft: "2px solid " + T.dg, fontSize: 9, color: T.tm }}>{r.dtMinName || "\u2014"}</td>
+                  <td style={{ borderLeft: "2px solid " + T.dg, fontSize: 10, color: T.tm }}>{r.dtMinName || "\u2014"}</td>
                   <td className="m" style={{ textAlign: "right" }}>{fmt(r.dtMinPI)}</td>
                   <td className="m" style={{ textAlign: "right" }}>{fmt(r.dtMin2nd)}</td>
                   <td className="m" style={{ textAlign: "right" }}>{fmt(r.dtMinSF)}</td>
@@ -233,7 +253,7 @@ export default function RecPricePage() {
                   <td className="m" style={{ textAlign: "center", color: T.tm }}>{r.dtCount || "\u2014"}</td>
                   <td className="m" style={{ textAlign: "right", borderLeft: "2px solid " + T.ac, color: T.tm }}>{fmt(r.target)}</td>
                   <td className="m" style={{ textAlign: "right", color: T.tm }}>{fmt(r.floor)}</td>
-                  <td className="m" style={{ textAlign: "right", fontWeight: 700, color: T.ac, fontSize: 11 }}>{fmt(r.V)}</td>
+                  <td className="m" style={{ textAlign: "right", fontWeight: 700, color: T.ac, fontSize: 13 }}>{fmt(r.V)}</td>
                   <td className="m" style={{ textAlign: "right" }}>{fmt(r.W)}</td>
                   <td className="m" style={{ textAlign: "right", color: T.tm }}>{fmt(r.rec2nd)}</td>
                   <td className="m" style={{ textAlign: "right", color: T.tm }}>{fmt(r.shipF)}</td>
@@ -243,17 +263,17 @@ export default function RecPricePage() {
                   <td className="m" style={{ textAlign: "right", fontWeight: 600, color: r.chTot != null && r.chTot > 0 ? T.ac : T.dg }}>{r.chTot != null ? (r.chTot >= 0 ? "+" : "") + r.chTot.toFixed(2) : "\u2014"}</td>
                   <td className="m" style={{ textAlign: "center" }}>{r.rank != null ? r.rank + "/" + (r.dtCount + 1) : "\u2014"}</td>
                   <td className="m" style={{ textAlign: "right", borderLeft: "2px solid " + T.w, fontWeight: 600, color: lnColor(r.lnMin) }}>{fmt(r.lnMin)}</td>
-                  <td style={{ fontSize: 8, color: T.tm }}>{r.worst1?.sup || "\u2014"}</td>
-                  <td style={{ fontSize: 8, color: T.tm }}>{r.worst1 ? <span className="b" style={{ background: ltColor(r.worst1.lbl) + "22", color: ltColor(r.worst1.lbl), fontSize: 7 }}>{r.worst1.lbl}</span> : "\u2014"}</td>
+                  <td style={{ fontSize: 9, color: T.tm }}>{r.worst1?.sup || "\u2014"}</td>
+                  <td style={{ fontSize: 9, color: T.tm }}>{r.worst1 ? <span className="b" style={{ background: ltColor(r.worst1.lbl) + "22", color: ltColor(r.worst1.lbl), fontSize: 8 }}>{r.worst1.lbl}</span> : "\u2014"}</td>
                   <td className="m" style={{ textAlign: "right", fontWeight: 600, color: lnColor(r.lnAvg) }}>{fmt(r.lnAvg)}</td>
                   <td className="m" style={{ textAlign: "right", fontWeight: 600, color: lnColor(r.lnMax) }}>{fmt(r.lnMax)}</td>
-                  <td style={{ fontSize: 8, color: T.tm }}>{r.best1?.sup || "\u2014"}</td>
-                  <td style={{ fontSize: 8, color: T.tm }}>{r.best1 ? <span className="b" style={{ background: ltColor(r.best1.lbl) + "22", color: ltColor(r.best1.lbl), fontSize: 7 }}>{r.best1.lbl}</span> : "\u2014"}</td>
-                  <td style={{ fontSize: 8, color: r.verdictColor, whiteSpace: "nowrap" }}>{r.verdict}</td>
+                  <td style={{ fontSize: 9, color: T.tm }}>{r.best1?.sup || "\u2014"}</td>
+                  <td style={{ fontSize: 9, color: T.tm }}>{r.best1 ? <span className="b" style={{ background: ltColor(r.best1.lbl) + "22", color: ltColor(r.best1.lbl), fontSize: 8 }}>{r.best1.lbl}</span> : "\u2014"}</td>
+                  <td style={{ fontSize: 9, color: r.verdictColor, whiteSpace: "nowrap" }}>{r.verdict}</td>
                   <td className="m" style={{ textAlign: "right", borderLeft: "2px solid " + T.dg, cursor: "pointer", textDecoration: "underline dotted", color: r.lockedV != null ? T.tx : T.td }} onClick={() => { setEditLk(r.lkKey); setEditLkVal(r.lockedV != null ? r.lockedV : "") }}>{r.lockedV != null ? fmt(r.lockedV) : "\u2014"}</td>
                   <td className="m" style={{ textAlign: "right", fontWeight: 600, color: T.ac }}>{fmt(r.V)}</td>
-                  <td style={{ fontSize: 8, color: r.stressOk ? T.ac : T.dg, whiteSpace: "nowrap" }}>{r.stressMsg}</td>
-                  <td style={{ fontSize: 7, color: r.scOk ? T.ac : T.dg, whiteSpace: "nowrap" }}>{r.scMsg}</td>
+                  <td style={{ fontSize: 9, color: r.stressOk ? T.ac : T.dg, whiteSpace: "nowrap" }}>{r.stressMsg}</td>
+                  <td style={{ fontSize: 8, color: r.scOk ? T.ac : T.dg, whiteSpace: "nowrap" }}>{r.scMsg}</td>
                 </tr>
               ))}
             </tbody>
